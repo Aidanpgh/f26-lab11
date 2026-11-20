@@ -75,9 +75,19 @@ outage), which is why cancellations kept working during the incident.
 
 ### Your prediction (before you run anything)
 
-**What you expect `redeliver` on a refund message to do.** Name what you expect
-to change in the ledger, at the payment provider, and in the bus log. Write it
-down, then run the demo.
+**What you expect `redeliver` on a refund message to do.** `RefundLedger.handle()`
+only appends: every delivery pushes a new ledger entry and calls
+`gateway.refund()`, and nothing checks whether this message or booking was
+already refunded. `redeliver` hands the same message (same id) to the same
+subscribers again. So after the cancellation plus two redeliveries I expect:
+
+- **Ledger:** 3 entries for the same booking (`led-1`, `led-2`, `led-3`), and
+  `totalRefundedCents` = 3 × the refund amount.
+- **Payment provider:** 3 settlements (`stl-1` to `stl-3`) for the same booking,
+  so the organizer is actually paid 3 × what they are owed.
+- **Bus log:** still only one `refund.requested` message with the same id (no new
+  message is published), its delivery count goes 1 → 2 → 3, and no dead letters
+  because nothing throws.
 
 ### Before your fix
 
