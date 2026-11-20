@@ -24,6 +24,8 @@ export class RefundLedger implements Subscriber<RefundRequested> {
   readonly name = 'RefundLedger';
 
   private readonly entries: LedgerEntry[] = [];
+  /** Booking ids the payment provider has confirmed a refund for. */
+  private readonly paid = new Set<string>();
   private readonly gateway: PaymentGateway;
 
   constructor(gateway: PaymentGateway) {
@@ -32,15 +34,23 @@ export class RefundLedger implements Subscriber<RefundRequested> {
 
   handle(message: Message<RefundRequested>): void {
     const event = message.payload;
-    this.entries.push({
-      entryId: `led-${this.entries.length + 1}`,
-      bookingId: event.bookingId,
-      organizer: event.organizer,
-      amountCents: event.amountCents,
-      reason: event.reason,
-      recordedAtMinute: message.publishedAtMinute,
-    });
-    this.gateway.refund(event.bookingId, event.amountCents);
+    // Idempotency key: the booking id. A booking can be cancelled only once,
+    // so it is owed at most one refund. Each step is checked on its own, so a
+    // delivery that wrote the entry but failed to pay is finished, not skipped.
+    if (this.forBooking(event.bookingId).length === 0) {
+      this.entries.push({
+        entryId: `led-${this.entries.length + 1}`,
+        bookingId: event.bookingId,
+        organizer: event.organizer,
+        amountCents: event.amountCents,
+        reason: event.reason,
+        recordedAtMinute: message.publishedAtMinute,
+      });
+    }
+    if (!this.paid.has(event.bookingId)) {
+      this.gateway.refund(event.bookingId, event.amountCents);
+      this.paid.add(event.bookingId);
+    }
   }
 
   /** Every ledger entry, oldest first. */

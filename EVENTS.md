@@ -94,21 +94,179 @@ subscribers again. So after the cancellation plus two redeliveries I expect:
 **The run.** Paste what `npm run demo:replay` printed without editing it. A TA
 may ask you about it in milestone 3.
 
-**Your prediction against the run.** Where they agree and where they do not.
+```
+
+> campus-reservations@1.0.0 demo:replay
+> tsx src/demos/replayDemo.ts
+
+booked bk-1001 for 8500 cents
+cancelled bk-1001, refund 8500 cents, refund message msg-3
+
+=== after the cancellation (one delivery of the refund message) ===
+ledger entries: 1
+  led-1 bk-1001 $85.00 (cancelled more than two hours ahead)
+gateway calls: 1
+gateway settlements: 1
+  stl-1 bk-1001 $85.00
+money returned in total: $85.00
+dead letters: 0
+
+redelivering msg-3
+
+=== after one redelivery ===
+ledger entries: 2
+  led-1 bk-1001 $85.00 (cancelled more than two hours ahead)
+  led-2 bk-1001 $85.00 (cancelled more than two hours ahead)
+gateway calls: 2
+gateway settlements: 2
+  stl-1 bk-1001 $85.00
+  stl-2 bk-1001 $85.00
+money returned in total: $170.00
+dead letters: 0
+
+redelivering msg-3 again
+
+=== after two redeliveries ===
+ledger entries: 3
+  led-1 bk-1001 $85.00 (cancelled more than two hours ahead)
+  led-2 bk-1001 $85.00 (cancelled more than two hours ahead)
+  led-3 bk-1001 $85.00 (cancelled more than two hours ahead)
+gateway calls: 3
+gateway settlements: 3
+  stl-1 bk-1001 $85.00
+  stl-2 bk-1001 $85.00
+  stl-3 bk-1001 $85.00
+money returned in total: $255.00
+dead letters: 0
+
+=== bus log ===
+  msg-1 booking.confirmed deliveries=1
+  msg-2 booking.cancelled deliveries=1
+  msg-3 refund.requested deliveries=3
+```
+
+**Your prediction against the run.** They agree on every point. Each delivery
+of `msg-3` added a ledger entry (`led-1` to `led-3`) and a settlement (`stl-1` to
+`stl-3`), so an $85.00 refund paid out $255.00. The bus log still has one
+`refund.requested` message, with `deliveries=3`, and there are 0 dead letters,
+because nothing threw. Paying the organizer twice extra raised no error at all.
 
 ### Your fix
 
 **The diff.** Paste it.
 
+```diff
+diff --git a/src/handlers/refundLedger.ts b/src/handlers/refundLedger.ts
+index 600ffca..d4aec1f 100644
+--- a/src/handlers/refundLedger.ts
++++ b/src/handlers/refundLedger.ts
+@@ -24,6 +24,8 @@ export class RefundLedger implements Subscriber<RefundRequested> {
+   readonly name = 'RefundLedger';
+ 
+   private readonly entries: LedgerEntry[] = [];
++  /** Booking ids the payment provider has confirmed a refund for. */
++  private readonly paid = new Set<string>();
+   private readonly gateway: PaymentGateway;
+ 
+   constructor(gateway: PaymentGateway) {
+@@ -32,15 +34,23 @@ export class RefundLedger implements Subscriber<RefundRequested> {
+ 
+   handle(message: Message<RefundRequested>): void {
+     const event = message.payload;
+-    this.entries.push({
+-      entryId: `led-${this.entries.length + 1}`,
+-      bookingId: event.bookingId,
+-      organizer: event.organizer,
+-      amountCents: event.amountCents,
+-      reason: event.reason,
+-      recordedAtMinute: message.publishedAtMinute,
+-    });
+-    this.gateway.refund(event.bookingId, event.amountCents);
++    // Idempotency key: the booking id. A booking can be cancelled only once,
++    // so it is owed at most one refund. Each step is checked on its own, so a
++    // delivery that wrote the entry but failed to pay is finished, not skipped.
++    if (this.forBooking(event.bookingId).length === 0) {
++      this.entries.push({
++        entryId: `led-${this.entries.length + 1}`,
++        bookingId: event.bookingId,
++        organizer: event.organizer,
++        amountCents: event.amountCents,
++        reason: event.reason,
++        recordedAtMinute: message.publishedAtMinute,
++      });
++    }
++    if (!this.paid.has(event.bookingId)) {
++      this.gateway.refund(event.bookingId, event.amountCents);
++      this.paid.add(event.bookingId);
++    }
+   }
+ 
+   /** Every ledger entry, oldest first. */
+```
+
 **What your fix uses to decide what to do on a second delivery, and what it
-does not protect.** One or two lines.
+does not protect.** The key is the **booking id**: a booking can be cancelled
+only once, so it is owed at most one refund. The handler checks each step on its
+own. It writes the ledger entry only if that booking has none, and it calls the
+provider only if that booking is not in its `paid` set. This also blocks a second,
+different refund message for the same booking. It does **not** protect:
+legitimate multiple refunds for one booking (they would be wrongly skipped), a
+second refund message with a *different amount* (the first amount wins
+silently), the `paid` set being lost on restart (it lives in memory, so a real
+service would store it durably or pass the booking id to the provider as its
+idempotency key), or a provider that settles the money but fails before
+answering (we never record `paid`, so a redelivery would pay again).
 
 ### After your fix
 
 **The run.** Paste what `npm run demo:replay` printed on the fixed code.
 
-**What stays the same across its three states.** Name the numbers you
-compared.
+```
+booked bk-1001 for 8500 cents
+cancelled bk-1001, refund 8500 cents, refund message msg-3
+
+=== after the cancellation (one delivery of the refund message) ===
+ledger entries: 1
+  led-1 bk-1001 $85.00 (cancelled more than two hours ahead)
+gateway calls: 1
+gateway settlements: 1
+  stl-1 bk-1001 $85.00
+money returned in total: $85.00
+dead letters: 0
+
+redelivering msg-3
+
+=== after one redelivery ===
+ledger entries: 1
+  led-1 bk-1001 $85.00 (cancelled more than two hours ahead)
+gateway calls: 1
+gateway settlements: 1
+  stl-1 bk-1001 $85.00
+money returned in total: $85.00
+dead letters: 0
+
+redelivering msg-3 again
+
+=== after two redeliveries ===
+ledger entries: 1
+  led-1 bk-1001 $85.00 (cancelled more than two hours ahead)
+gateway calls: 1
+gateway settlements: 1
+  stl-1 bk-1001 $85.00
+money returned in total: $85.00
+dead letters: 0
+
+=== bus log ===
+  msg-1 booking.confirmed deliveries=1
+  msg-2 booking.cancelled deliveries=1
+  msg-3 refund.requested deliveries=3
+```
+
+**What stays the same across its three states.** After the cancellation,
+after one redelivery, and after two: ledger entries = 1 (`led-1`), gateway calls
+= 1, gateway settlements = 1 (`stl-1`), money returned = $85.00 (equal to the
+refund owed), and dead letters = 0. The only number that changes is the bus's
+delivery count for `msg-3`, which reaches `deliveries=3`.
 
 ---
 
