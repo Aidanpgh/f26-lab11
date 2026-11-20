@@ -277,9 +277,40 @@ delivery count for `msg-3`, which reaches `deliveries=3`.
 **The run.** Run `npm run demo:failure` and paste what the delivery left
 behind (the ledger, the provider, and the dead-letter list).
 
+```
+armed: call 1 to the payment provider will throw
+booked bk-1001 for 8500 cents
+cancelled bk-1001, refund 8500 cents, refund message msg-3
+the cancel call itself returned: booking is cancelled
+
+=== after the failed delivery ===
+ledger entries: 1
+  led-1 bk-1001 $85.00 (cancelled more than two hours ahead)
+gateway calls: 1
+gateway settlements: 0
+money returned in total: $0.00
+dead letters: 1
+  msg-3 refund.requested attempt 1 in RefundLedger: payment provider did not answer on call 1 for bk-1001
+    failedAtMinute: 480
+    payload: {"bookingId":"bk-1001","organizer":"H. Ahmad","organizerEmail":"hahmad@example.edu","amountCents":8500,"reason":"cancelled more than two hours ahead","requestedAtMinute":480}
+
+=== bus log ===
+  msg-1 booking.confirmed deliveries=1
+  msg-2 booking.cancelled deliveries=1
+  msg-3 refund.requested deliveries=1
+
+the refund message is in the log and in the dead-letter list. Milestone 3 asks what you do with it.
+```
+
 ### Your recovery
 
-**What, if anything, the failed delivery left undone.**
+**What, if anything, the failed delivery left undone.** The money. The
+cancellation itself finished (the booking is `cancelled` and `cancel()` returned
+normally), and `RefundLedger` wrote `led-1` for $85.00. Then
+`gateway.refund()` threw, so the provider settled nothing (0 settlements,
+$0.00 returned). The ledger says $85.00 was refunded, but the organizer has not
+been paid, so the books and the money disagree. The bus recorded one dead letter
+for `msg-3` (attempt 1, `RefundLedger`), and nothing retries it on its own.
 
 **The option you took and its evidence.** If you redelivered the
 message, paste the state after the redelivery and the bus log line for that
@@ -287,8 +318,43 @@ message. If you left the message for a person to handle, write the runbook line
 they would follow, and name which fields of the dead-lettered message they read to
 follow it and what each one tells them.
 
+I **redelivered** the message: `app.bus.redeliver(messageId)` at the end of
+`main()` in `src/demos/failureDemo.ts`, then `printRefundState` and
+`printMessageLog` again. `npm run typecheck` stays green.
+
+```
+=== after redelivering the refund message ===
+ledger entries: 1
+  led-1 bk-1001 $85.00 (cancelled more than two hours ahead)
+gateway calls: 2
+gateway settlements: 1
+  stl-1 bk-1001 $85.00
+money returned in total: $85.00
+dead letters: 1
+  msg-3 refund.requested attempt 1 in RefundLedger: payment provider did not answer on call 1 for bk-1001
+    failedAtMinute: 480
+    payload: {"bookingId":"bk-1001","organizer":"H. Ahmad","organizerEmail":"hahmad@example.edu","amountCents":8500,"reason":"cancelled more than two hours ahead","requestedAtMinute":480}
+
+=== bus log ===
+  msg-1 booking.confirmed deliveries=1
+  msg-2 booking.cancelled deliveries=1
+  msg-3 refund.requested deliveries=2
+```
+
+Bus log line for the refund message: `msg-3 refund.requested deliveries=2`.
+Delivery 1 failed at the provider, and delivery 2 finished the work. Because of
+the milestone 2 fix, delivery 2 saw that `bk-1001` already had a ledger entry
+and did not write `led-2`. It also saw that `bk-1001` was not yet paid, so it
+called the provider (gateway call 2) and settled `stl-1` for $85.00. The ledger
+($85.00) and the provider ($85.00) now agree. The dead-letter entry is still in
+the list, because the list is a log of failed attempts, not a queue, and
+`redeliver` removes nothing from it.
+
 ### The other option
 
-**What the option you did not take would have cost.** One line, in terms of who
-does the work, when the organizer gets their money, and what has to be true for
-it to be safe.
+**What the option you did not take would have cost.** Leaving it for triage
+means a person has to notice the dead letter, read it, check the provider, and
+act. The organizer gets their $85.00 only when someone gets to it (hours or the
+next business day, not seconds). It is safe without any idempotency in the
+handler, but only if that person checks the provider's settlements for
+`bk-1001` before paying, so they do not pay twice.
